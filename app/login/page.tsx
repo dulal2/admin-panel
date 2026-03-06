@@ -31,7 +31,7 @@ export default function LoginPage() {
         return
       }
 
-      router.push("/reports")
+      router.push("/forms")
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message)
