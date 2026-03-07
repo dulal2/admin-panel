@@ -265,10 +265,41 @@ export default function FormsPage() {
       const res  = await fetch("/api/delete-user", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      showToast(`✓ Deleted all data for ${email}`)
       setDeletions(prev => prev.filter(r => r.registeredEmail !== email && r.email !== email))
+      if (data.sheetError) {
+        showToast(`✓ Firebase deleted. ⚠ Sheet: ${data.sheetError}`)
+      } else if (data.sheetRowsDeleted > 0) {
+        showToast(`✓ Deleted Firebase + ${data.sheetRowsDeleted} row(s) from Sheet`)
+      } else {
+        showToast(`✓ Firebase deleted. (No rows found in Sheet)`)
+      }
     } catch (e: unknown) { showToast(`⚠ ${e instanceof Error ? e.message : "Failed"}`) }
     finally { setDeleting(false); setConfirmEmail(null) }
+  }
+
+  const handleDeleteSheetRow = async (email: string) => {
+    try {
+      const key  = process.env.NEXT_PUBLIC_GOOGLE_SHEETS_API_KEY
+      const url  = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_NAME + "!A2:D1000")}?key=${key}`
+      const res  = await fetch(url)
+      const data = await res.json()
+      const rows: string[][] = data.values ?? []
+      const target = email.toLowerCase().trim()
+      const matchIndex = rows.findIndex(r =>
+        (r[1] ?? "").toLowerCase().trim() === target ||
+        (r[2] ?? "").toLowerCase().trim() === target
+      )
+      if (matchIndex === -1) { showToast("⚠ No matching row found in Sheet"); return }
+      const delRes  = await fetch("/api/delete-sheet-row", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rowIndex: matchIndex + 2 }),
+      })
+      const delData = await delRes.json()
+      if (!delRes.ok) throw new Error(delData.error)
+      setDeletions(prev => prev.filter(r => r.registeredEmail !== email && r.email !== email))
+      showToast("✓ Row removed from Google Sheet")
+    } catch (e: unknown) { showToast(`⚠ ${e instanceof Error ? e.message : "Sheet deletion failed"}`) }
   }
 
   // ── Question CRUD ──
@@ -695,7 +726,12 @@ export default function FormsPage() {
                             <td><div className="email-cell">{r.email}</div></td>
                             <td><div className="email-cell">{r.registeredEmail}</div></td>
                             <td><span className="delete-type-badge">🗑 Delete</span></td>
-                            <td><button className="btn-del" onClick={() => setConfirmEmail(r.registeredEmail)}>Delete Account</button></td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="btn-del" onClick={() => setConfirmEmail(r.registeredEmail)}>🗑 Delete Account</button>
+                                <button className="btn-secondary" style={{fontSize:11,padding:"5px 10px"}} onClick={() => handleDeleteSheetRow(r.registeredEmail)}>📋 Remove from Sheet</button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
