@@ -30,14 +30,6 @@ interface DeletionRequest {
   confirmation: string
 }
 
-interface FirestoreQuestion {
-  id: string
-  questionText: string
-  options: string[]
-  correctAnswer: number
-  category: string
-}
-
 interface MockTestQuestion {
   text: string
   options: string[]
@@ -51,6 +43,14 @@ interface MockTestPaper {
   questions: MockTestQuestion[]
   totalQuestions: number
   createdAt: Timestamp
+}
+
+interface QuestionFile {
+  category: string          // "OPTG" | "COMM" | "Estd Rule" | "Rajbhasa"
+  fileName: string          // "optg.json"
+  totalQuestions: number
+  uploadedAt: Timestamp | null
+  questions: { questionText: string; options: string[]; correctAnswer: number }[]
 }
 
 interface QuestionForm {
@@ -70,7 +70,6 @@ const EMPTY_FORM: QuestionForm = {
   correctAnswer: 0, category: "OPTG",
 }
 
-const CATEGORIES = ["OPTG", "COMM", "Estd Rule", "Rajbhasa"]
 
 const STATUS_META: Record<ReportStatus, { label: string; color: string; bg: string }> = {
   pending:   { label: "Pending",  color: "#f59e0b", bg: "rgba(245,158,11,0.1)"  },
@@ -113,28 +112,24 @@ export default function FormsPage() {
   const [confirmEmail, setConfirmEmail]         = useState<string | null>(null)
   const [deleting, setDeleting]                 = useState(false)
 
-  // ── Questions ──
-  const [questions, setQuestions]                   = useState<FirestoreQuestion[]>([])
-  const [questionsLoading, setQuestionsLoading]     = useState(false)
-  const [qSearch, setQSearch]                       = useState("")
-  const [qCategoryFilter, setQCategoryFilter]       = useState("All")
-  const [editingQuestion, setEditingQuestion]       = useState<FirestoreQuestion | null>(null)
-  const [showAddForm, setShowAddForm]               = useState(false)
-  const [questionForm, setQuestionForm]             = useState<QuestionForm>({ ...EMPTY_FORM })
-  const [savingQuestion, setSavingQuestion]         = useState(false)
-  const [deleteQConfirm, setDeleteQConfirm]         = useState<string | null>(null)
-  const [uploadLoading, setUploadLoading]           = useState(false)
-  const [uploadResult, setUploadResult]             = useState("")
-  // Category-specific upload refs (add)
-  const fileInputOPTG                               = useRef<HTMLInputElement>(null)
-  const fileInputCOMM                               = useRef<HTMLInputElement>(null)
-  const fileInputEstd                               = useRef<HTMLInputElement>(null)
-  const fileInputRaj                                = useRef<HTMLInputElement>(null)
-  // Category-specific replace refs (delete old + upload new)
-  const fileReplaceOPTG                             = useRef<HTMLInputElement>(null)
-  const fileReplaceCOMM                             = useRef<HTMLInputElement>(null)
-  const fileReplaceEstd                             = useRef<HTMLInputElement>(null)
-  const fileReplaceRaj                              = useRef<HTMLInputElement>(null)
+  // ── Questions (file-based, one doc per category) ──
+  const CAT_FILES = [
+    { cat: "OPTG",      file: "optg.json",     color: "#818cf8", bg: "rgba(99,102,241,0.08)",  border: "rgba(99,102,241,0.3)"  },
+    { cat: "COMM",      file: "comm.json",     color: "#10b981", bg: "rgba(16,185,129,0.08)",  border: "rgba(16,185,129,0.3)"  },
+    { cat: "Estd Rule", file: "estd.json",     color: "#f59e0b", bg: "rgba(245,158,11,0.08)",  border: "rgba(245,158,11,0.3)"  },
+    { cat: "Rajbhasa",  file: "rajbhasa.json", color: "#f87171", bg: "rgba(239,68,68,0.08)",   border: "rgba(239,68,68,0.3)"   },
+  ]
+  const [questionFiles, setQuestionFiles]           = useState<Record<string, QuestionFile>>({})
+  const [qFilesLoading, setQFilesLoading]           = useState(false)
+  const [qUploadingCat, setQUploadingCat]           = useState<string | null>(null)
+  const [qUploadResult, setQUploadResult]           = useState("")
+  const [deleteQCatConfirm, setDeleteQCatConfirm]   = useState<string | null>(null)
+  const qFileRefs: Record<string, React.RefObject<HTMLInputElement | null>> = {
+    "OPTG":      useRef<HTMLInputElement>(null),
+    "COMM":      useRef<HTMLInputElement>(null),
+    "Estd Rule": useRef<HTMLInputElement>(null),
+    "Rajbhasa":  useRef<HTMLInputElement>(null),
+  }
 
   // ── Mock Tests ──
   const [mockTests, setMockTests]                     = useState<MockTestPaper[]>([])
@@ -153,9 +148,6 @@ export default function FormsPage() {
   const mockUpdateFileInputRef                        = useRef<HTMLInputElement>(null)
 
   // ── JSON Update (Questions) ──
-  const [updateQTarget, setUpdateQTarget]             = useState<FirestoreQuestion | null>(null)
-  const [qUpdateLoading, setQUpdateLoading]           = useState(false)
-  const qUpdateFileInputRef                           = useRef<HTMLInputElement>(null)
 
   // ── Toast ──
   const [toast, setToast] = useState("")
@@ -194,25 +186,30 @@ export default function FormsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection])
 
-  // ── Fetch questions from Firestore ──
-  const fetchQuestions = async () => {
-    setQuestionsLoading(true)
+  // ── Fetch question files (one doc per category in question_files collection) ──
+  const fetchQuestionFiles = async () => {
+    setQFilesLoading(true)
     try {
-      const snap = await getDocs(collection(db, "questions"))
-      setQuestions(snap.docs.map(d => ({
-        id: d.id,
-        questionText:  d.data().questionText  ?? "",
-        options:       d.data().options       ?? ["","","",""],
-        correctAnswer: d.data().correctAnswer ?? 0,
-        category:      d.data().category      ?? "General",
-      })))
+      const snap = await getDocs(collection(db, "question_files"))
+      const map: Record<string, QuestionFile> = {}
+      snap.docs.forEach(d => {
+        const data = d.data()
+        map[data.category] = {
+          category:       data.category,
+          fileName:       data.fileName,
+          totalQuestions: data.totalQuestions ?? 0,
+          uploadedAt:     data.uploadedAt ?? null,
+          questions:      data.questions ?? [],
+        }
+      })
+      setQuestionFiles(map)
     } catch {
-      showToast(`⚠ Failed to load questions`)
-    } finally { setQuestionsLoading(false) }
+      showToast("⚠ Failed to load question files")
+    } finally { setQFilesLoading(false) }
   }
 
   useEffect(() => {
-    if (activeSection === "questions" && questions.length === 0) fetchQuestions()
+    if (activeSection === "questions") fetchQuestionFiles()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection])
 
@@ -229,11 +226,7 @@ export default function FormsPage() {
     r.email.toLowerCase().includes(search.toLowerCase()) ||
     r.registeredEmail.toLowerCase().includes(search.toLowerCase())
   )
-  const filteredQuestions = questions.filter(q => {
-    const matchCat    = qCategoryFilter === "All" || q.category === qCategoryFilter
-    const matchSearch = q.questionText.toLowerCase().includes(qSearch.toLowerCase())
-    return matchCat && matchSearch
-  })
+
 
   // ── Report actions ──
   const openDetail = (r: Report) => { setSelected(r); setAdminNote(r.adminNote ?? ""); setShowCorrection(false) }
@@ -321,150 +314,74 @@ export default function FormsPage() {
     } catch (e: unknown) { showToast(`⚠ ${e instanceof Error ? e.message : "Sheet deletion failed"}`) }
   }
 
-  // ── Question CRUD ──
-  const openAddForm   = () => { setQuestionForm({ ...EMPTY_FORM }); setEditingQuestion(null); setShowAddForm(true) }
-  const openEditForm  = (q: FirestoreQuestion) => {
-    setQuestionForm({
-      questionText:  q.questionText,
-      optionA:       q.options[0] ?? "",
-      optionB:       q.options[1] ?? "",
-      optionC:       q.options[2] ?? "",
-      optionD:       q.options[3] ?? "",
-      correctAnswer: q.correctAnswer,
-      category:      q.category,
-    })
-    setEditingQuestion(q); setShowAddForm(true)
+  // ── Upload category JSON → single doc in question_files collection ──
+  const handleQFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, category: string, fileName: string) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setQUploadingCat(category); setQUploadResult("")
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
+
+      const questions = raw.map((q: unknown) => {
+        const item = q as Record<string, unknown>
+        return {
+          questionText:  (item.question ?? item.text ?? item.questionText ?? "") as string,
+          options:       (item.options ?? []) as string[],
+          correctAnswer: (item.correctAnswer ?? item.correctAnswerIndex ?? 0) as number,
+        }
+      }).filter(q => q.questionText && Array.isArray(q.options) && q.options.length === 4)
+
+      if (questions.length === 0) throw new Error("No valid questions found in file")
+
+      // Store as single document, doc ID = category key e.g. "Estd_Rule"
+      const docId = category.replace(/\s+/g, "_")
+      await setDoc(doc(db, "question_files", docId), {
+        category,
+        fileName,
+        questions,
+        totalQuestions: questions.length,
+        uploadedAt:     Timestamp.now(),
+      })
+
+      setQuestionFiles(prev => ({
+        ...prev,
+        [category]: { category, fileName, totalQuestions: questions.length, uploadedAt: Timestamp.now(), questions }
+      }))
+      setQUploadResult(`✓ [${category}] ${questions.length} questions saved`)
+    } catch (e: unknown) {
+      setQUploadResult(`⚠ ${e instanceof Error ? e.message : "Upload failed"}`)
+    } finally {
+      setQUploadingCat(null)
+      const ref = qFileRefs[category]
+      if (ref?.current) ref.current.value = ""
+    }
   }
 
-  const handleSaveQuestion = async () => {
-    const { questionText, optionA, optionB, optionC, optionD, correctAnswer, category } = questionForm
-    if (!questionText || !optionA || !optionB || !optionC || !optionD) return
-    setSavingQuestion(true)
-    try {
-      const data = { questionText, options: [optionA, optionB, optionC, optionD], correctAnswer, category }
-      if (editingQuestion) {
-        await updateDoc(doc(db, "questions", editingQuestion.id), data)
-        setQuestions(prev => prev.map(q => q.id === editingQuestion.id ? { ...q, ...data } : q))
-        showToast("✓ Question updated")
-      } else {
-        const ref = await addDoc(collection(db, "questions"), { ...data, createdAt: Timestamp.now() })
-        setQuestions(prev => [...prev, { id: ref.id, ...data }])
-        showToast("✓ Question added")
-      }
-      setShowAddForm(false)
-    } catch (e: unknown) { showToast(`⚠ ${e instanceof Error ? e.message : "Failed"}`) }
-    finally { setSavingQuestion(false) }
+  // ── Download category as JSON ──
+  const handleQFileDownload = (cat: string) => {
+    const qf = questionFiles[cat]
+    if (!qf) return
+    const blob = new Blob([JSON.stringify(qf.questions, null, 2)], { type: "application/json" })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement("a"); a.href = url
+    a.download = qf.fileName; a.click(); URL.revokeObjectURL(url)
+    showToast("📥 " + qf.fileName + " downloaded")
   }
 
-  const handleDeleteQuestion = async (id: string) => {
+  // ── Delete category file from Firestore ──
+  const handleQFileDelete = async (cat: string) => {
     try {
-      await deleteDoc(doc(db, "questions", id))
-      setQuestions(prev => prev.filter(q => q.id !== id))
-      showToast("✓ Question deleted")
+      const docId = cat.replace(/\s+/g, "_")
+      await deleteDoc(doc(db, "question_files", docId))
+      setQuestionFiles(prev => { const n = { ...prev }; delete n[cat]; return n })
+      showToast("✓ " + cat + " questions deleted")
     } catch { showToast("⚠ Failed to delete") }
-    setDeleteQConfirm(null)
+    setDeleteQCatConfirm(null)
   }
 
-  // ── Core upload function — writes directly to Firestore with fixed category ──
-  const uploadQuestionsWithCategory = async (
-    file: File,
-    category: string,
-    inputRef: React.RefObject<HTMLInputElement | null>
-  ) => {
-    setUploadLoading(true); setUploadResult("")
-    try {
-      const text = await file.text()
-      const parsed = JSON.parse(text)
-      const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
-
-      const validQuestions = raw.map((q: unknown) => {
-        const item = q as Record<string, unknown>
-        return {
-          questionText:  (item.question ?? item.text ?? item.questionText ?? "") as string,
-          options:       (item.options ?? []) as string[],
-          correctAnswer: (item.correctAnswer ?? item.correctAnswerIndex ?? 0) as number,
-          category,
-        }
-      }).filter(q => q.questionText && Array.isArray(q.options) && q.options.length === 4)
-
-      if (validQuestions.length === 0) throw new Error("No valid questions found in file")
-
-      await Promise.all(
-        validQuestions.map(q =>
-          addDoc(collection(db, "questions"), {
-            questionText:  q.questionText,
-            options:       q.options,
-            correctAnswer: q.correctAnswer,
-            category:      category,   // always use the button's fixed category
-            createdAt:     Timestamp.now(),
-          })
-        )
-      )
-
-      setUploadResult(`✓ Uploaded ${validQuestions.length} questions to [${category}] from ${file.name}`)
-      fetchQuestions()
-    } catch (e: unknown) {
-      setUploadResult(`⚠ ${e instanceof Error ? e.message : "Upload failed"}`)
-    } finally {
-      setUploadLoading(false)
-      if (inputRef.current) inputRef.current.value = ""
-    }
-  }
-
-  // Per-category upload handlers (matches app asset folder structure)
-  const handleUploadOPTG        = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "OPTG",      fileInputOPTG) }
-  const handleUploadCOMM        = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "COMM",      fileInputCOMM) }
-  const handleUploadEstd        = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "Estd Rule", fileInputEstd) }
-  const handleUploadRaj         = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "Rajbhasa",  fileInputRaj)  }
-
-  // Delete ALL questions for a category then re-upload (clean replace)
-  const handleReplaceCategory = async (file: File, category: string, inputRef: React.RefObject<HTMLInputElement | null>) => {
-    setUploadLoading(true); setUploadResult("")
-    try {
-      // Step 1: delete all existing docs for this category
-      const snap = await getDocs(collection(db, "questions"))
-      const toDelete = snap.docs.filter(d => d.data().category === category)
-      await Promise.all(toDelete.map(d => deleteDoc(doc(db, "questions", d.id))))
-
-      // Step 2: parse and upload new questions
-      const text = await file.text()
-      const parsed = JSON.parse(text)
-      const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
-
-      const validQuestions = raw.map((q: unknown) => {
-        const item = q as Record<string, unknown>
-        return {
-          questionText:  (item.question ?? item.text ?? item.questionText ?? "") as string,
-          options:       (item.options ?? []) as string[],
-          correctAnswer: (item.correctAnswer ?? item.correctAnswerIndex ?? 0) as number,
-        }
-      }).filter(q => q.questionText && Array.isArray(q.options) && q.options.length === 4)
-
-      if (validQuestions.length === 0) throw new Error("No valid questions found in file")
-
-      await Promise.all(
-        validQuestions.map(q =>
-          addDoc(collection(db, "questions"), {
-            questionText:  q.questionText,
-            options:       q.options,
-            correctAnswer: q.correctAnswer,
-            category:      category,
-            createdAt:     Timestamp.now(),
-          })
-        )
-      )
-
-      setUploadResult(`✓ Replaced [${category}]: deleted ${toDelete.length} old, uploaded ${validQuestions.length} new questions`)
-      fetchQuestions()
-    } catch (e: unknown) {
-      setUploadResult(`⚠ ${e instanceof Error ? e.message : "Replace failed"}`)
-    } finally {
-      setUploadLoading(false)
-      if (inputRef.current) inputRef.current.value = ""
-    }
-  }
-
-  // ── Mock Tests CRUD ──
+    // ── Mock Tests CRUD ──
   const fetchMockTests = async () => {
     setMockTestsLoading(true)
     try {
@@ -563,25 +480,7 @@ export default function FormsPage() {
     showToast("📥 JSON downloaded — edit it, then click 'Upload Updated JSON'")
   }
 
-  const handleDownloadQuestionJson = (q: FirestoreQuestion) => {
-    const exportData = {
-      id: q.id,
-      questionText: q.questionText,
-      options: q.options,
-      correctAnswer: q.correctAnswer,
-      category: q.category,
-    }
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
-    const url  = URL.createObjectURL(blob)
-    const a    = document.createElement("a"); a.href = url
-    a.download = `question_${q.id}.json`
-    a.click(); URL.revokeObjectURL(url)
-    setUpdateQTarget(q)
-    showToast("📥 JSON downloaded — edit it, then click 'Upload Updated JSON'")
-  }
-
-  // ── Handle re-upload of edited JSON → Firestore ──
-  const handleMockJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleMockJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !updateMockTarget) return
     setMockUpdateLoading(true)
@@ -621,40 +520,8 @@ export default function FormsPage() {
     }
   }
 
-  const handleQuestionJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !updateQTarget) return
-    setQUpdateLoading(true)
-    try {
-      const text   = await file.text()
-      const parsed = JSON.parse(text) as Record<string, unknown>
 
-      const updatedData = {
-        questionText:  (parsed.questionText  ?? "") as string,
-        options:       (parsed.options       ?? ["","","",""]) as string[],
-        correctAnswer: (parsed.correctAnswer ?? 0) as number,
-        category:      (parsed.category      ?? "OPTG") as string,
-      }
 
-      if (!updatedData.questionText || !Array.isArray(updatedData.options) || updatedData.options.length !== 4)
-        throw new Error("Invalid question format in JSON")
-
-      await updateDoc(doc(db, "questions", updateQTarget.id), updatedData)
-
-      setQuestions(prev => prev.map(q =>
-        q.id === updateQTarget.id ? { ...q, ...updatedData } : q
-      ))
-      showToast("✓ Question updated in Firestore")
-      setUpdateQTarget(null)
-    } catch (e: unknown) {
-      showToast(`⚠ ${e instanceof Error ? e.message : "Update failed"}`)
-    } finally {
-      setQUpdateLoading(false)
-      if (qUpdateFileInputRef.current) qUpdateFileInputRef.current.value = ""
-    }
-  }
-
-  const formValid = questionForm.questionText && questionForm.optionA && questionForm.optionB && questionForm.optionC && questionForm.optionD
 
   return (
     <>
@@ -810,7 +677,7 @@ export default function FormsPage() {
           <div className="topbar-badges">
             {reportCounts.pending > 0 && <div className="badge badge-amber">{reportCounts.pending} pending</div>}
             {deletions.length > 0 && <div className="badge badge-red">{deletions.length} deletions</div>}
-            {questions.length > 0 && <div className="badge badge-indigo">{questions.length} questions</div>}
+            {Object.keys(questionFiles).length > 0 && <div className="badge badge-indigo">{Object.values(questionFiles).reduce((s, f) => s + f.totalQuestions, 0)} questions</div>}
             {mockTests.length > 0 && <div className="badge badge-amber">{mockTests.length} mock tests</div>}
           </div>
         </div>
@@ -850,7 +717,7 @@ export default function FormsPage() {
             <button className={`nav-btn ${activeSection === "questions" ? "active" : ""}`} onClick={() => setActiveSection("questions")}>
               <span className="nav-btn-icon">📚</span>
               <span className="nav-btn-text">Questions</span>
-              {questions.length > 0 && <span className="nav-badge" style={{ color: "#818cf8", background: "rgba(99,102,241,0.1)" }}>{questions.length}</span>}
+              {Object.keys(questionFiles).length > 0 && <span className="nav-badge" style={{ color: "#818cf8", background: "rgba(99,102,241,0.1)" }}>{Object.values(questionFiles).reduce((s, f) => s + f.totalQuestions, 0)}</span>}
             </button>
 
             <div className="sidebar-divider" />
@@ -1035,138 +902,93 @@ export default function FormsPage() {
             {/* QUESTIONS */}
             {activeSection === "questions" && (
               <>
-                {/* Category-wise upload cards — matches app asset folder */}
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 11, color: "rgba(140,155,200,0.4)", fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 10 }}>
-                    Upload Questions by Category
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-
-                    {[
-                      { cat: "OPTG",      color: "#818cf8", bg: "rgba(99,102,241,0.06)",  border: "rgba(99,102,241,0.25)",  file: "optg.json",     addRef: fileInputOPTG,  repRef: fileReplaceOPTG, onAdd: handleUploadOPTG,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "OPTG",      fileReplaceOPTG) } },
-                      { cat: "COMM",      color: "#10b981", bg: "rgba(16,185,129,0.06)",  border: "rgba(16,185,129,0.25)",  file: "comm.json",     addRef: fileInputCOMM,  repRef: fileReplaceCOMM, onAdd: handleUploadCOMM,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "COMM",      fileReplaceCOMM) } },
-                      { cat: "Estd Rule", color: "#f59e0b", bg: "rgba(245,158,11,0.06)",  border: "rgba(245,158,11,0.25)",  file: "estd.json",     addRef: fileInputEstd,  repRef: fileReplaceEstd, onAdd: handleUploadEstd,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "Estd Rule", fileReplaceEstd) } },
-                      { cat: "Rajbhasa", color: "#f87171", bg: "rgba(239,68,68,0.06)",   border: "rgba(239,68,68,0.25)",   file: "rajbhasa.json", addRef: fileInputRaj,   repRef: fileReplaceRaj,  onAdd: handleUploadRaj,   onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "Rajbhasa",  fileReplaceRaj)  } },
-                    ].map(({ cat, color, bg, border, file, addRef, repRef, onAdd, onRep }) => (
-                      <div key={cat} style={{ padding: "14px 16px", background: bg, border: `1px dashed ${border}`, borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color, fontFamily: "'IBM Plex Mono', monospace" }}>{cat}</div>
-                        <div style={{ fontSize: 10, color: "rgba(140,155,200,0.4)" }}>{file}</div>
-                        {/* Add — appends new questions without deleting existing */}
-                        <input ref={addRef} type="file" accept=".json" style={{ display: "none" }} onChange={onAdd} />
-                        <button
-                          style={{ padding: "5px 8px", borderRadius: 6, background: `${bg.replace("0.06", "0.12")}`, border: `1px solid ${border}`, color, cursor: "pointer", fontFamily: "'IBM Plex Sans', sans-serif", fontSize: 11, fontWeight: 500 }}
-                          onClick={() => addRef.current?.click()} disabled={uploadLoading}
-                        >
-                          ＋ Add Questions
-                        </button>
-                        {/* Replace — deletes all existing for this category then uploads fresh */}
-                        <input ref={repRef} type="file" accept=".json" style={{ display: "none" }} onChange={onRep} />
-                        <button
-                          style={{ padding: "5px 8px", borderRadius: 6, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#f87171", cursor: "pointer", fontFamily: "'IBM Plex Sans', sans-serif", fontSize: 11, fontWeight: 500 }}
-                          onClick={() => repRef.current?.click()} disabled={uploadLoading}
-                          title="Deletes ALL existing questions in this category, then uploads the new file"
-                        >
-                          🔄 Replace All
-                        </button>
-                      </div>
-                    ))}
-
-                  </div>
-                  {uploadResult && (
-                    <div style={{ marginTop: 10 }}>
-                      <span className={`upload-result ${uploadResult.startsWith("✓") ? "success" : "error"}`}>{uploadResult}</span>
-                    </div>
-                  )}
+                <div className="section-header" style={{ marginBottom: 16 }}>
+                  <span className="section-title">📚 Question Files ({Object.keys(questionFiles).length} / 4)</span>
+                  <button className="btn-secondary" onClick={fetchQuestionFiles}>↻ Refresh</button>
                 </div>
 
-                <div className="section-header">
-                  <div className="search-row">
-                    <input className="search-input" placeholder="Search questions..." value={qSearch} onChange={(e) => setQSearch(e.target.value)} />
-                    <select className="select-input" value={qCategoryFilter} onChange={(e) => setQCategoryFilter(e.target.value)}>
-                      <option value="All">All Categories</option>
-                      {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                    <button className="btn-secondary" onClick={fetchQuestions}>↻ Refresh</button>
+                {qUploadResult && (
+                  <div style={{ marginBottom: 12 }}>
+                    <span className={`upload-result ${qUploadResult.startsWith("✓") ? "success" : "error"}`}>{qUploadResult}</span>
                   </div>
-                  <button className="btn-primary" onClick={openAddForm}>+ Add Question</button>
-                </div>
+                )}
 
-                {questionsLoading ? <div className="empty">Loading questions...</div>
-                : filteredQuestions.length === 0 ? (
-                  <div className="empty">
-                    {questions.length === 0
-                      ? "No questions in Firestore yet. Upload a JSON file to migrate."
-                      : "No questions match your search."}
-                  </div>
-                ) : (
-                  <>
-                    <div className="q-count" style={{ marginBottom: 12 }}>Showing {filteredQuestions.length} of {questions.length} questions</div>
-
-                    {/* Hidden file input for question JSON re-upload */}
-                    <input
-                      ref={qUpdateFileInputRef}
-                      type="file"
-                      accept=".json"
-                      style={{ display: "none" }}
-                      onChange={handleQuestionJsonReupload}
-                    />
-
-                    {/* Update pending banner */}
-                    {updateQTarget && (
-                      <div style={{ marginBottom: 12, padding: "12px 16px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                        <span style={{ fontSize: 12, color: "#f59e0b" }}>
-                          📝 Editing question — Edit the downloaded JSON in VS Code, then upload it back.
-                        </span>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button
-                            className="btn-primary"
-                            style={{ background: "rgba(245,158,11,0.15)", borderColor: "rgba(245,158,11,0.35)", color: "#f59e0b" }}
-                            disabled={qUpdateLoading}
-                            onClick={() => qUpdateFileInputRef.current?.click()}
-                          >
-                            {qUpdateLoading ? "Saving..." : "⬆ Upload Updated JSON"}
-                          </button>
-                          <button className="btn-secondary" style={{ fontSize: 11, padding: "5px 10px" }} onClick={() => setUpdateQTarget(null)}>✕ Cancel</button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="table-wrap">
-                      <table className="table">
-                        <thead><tr><th>Question</th><th>Options</th><th>Correct</th><th>Category</th><th>Actions</th></tr></thead>
-                        <tbody>
-                          {filteredQuestions.map((q) => (
-                            <tr key={q.id}>
-                              <td><div className="question-preview">{q.questionText}</div></td>
-                              <td><div className="option-preview">{q.options.join(" / ")}</div></td>
-                              <td><span className="correct-badge">{["A","B","C","D"][q.correctAnswer]}</span></td>
-                              <td><span className="cat-tag">{q.category}</span></td>
+                {qFilesLoading ? <div className="empty">Loading...</div> : (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Category</th>
+                          <th>File Name</th>
+                          <th>Questions</th>
+                          <th>Last Uploaded</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {CAT_FILES.map(({ cat, file, color, bg }) => {
+                          const qf = questionFiles[cat]
+                          const inputRef = qFileRefs[cat]
+                          return (
+                            <tr key={cat}>
                               <td>
-                                <div className="row-actions">
-                                  <button className="btn-edit" onClick={() => openEditForm(q)}>✏ Edit</button>
+                                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color, background: bg, padding: "3px 10px", borderRadius: 6, fontSize: 12 }}>
+                                  {cat}
+                                </span>
+                              </td>
+                              <td style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: "rgba(201,209,232,0.6)" }}>
+                                {qf ? qf.fileName : <span style={{ color: "rgba(201,209,232,0.25)" }}>{file}</span>}
+                              </td>
+                              <td>
+                                {qf
+                                  ? <span style={{ color, fontWeight: 600 }}>{qf.totalQuestions}</span>
+                                  : <span style={{ color: "rgba(201,209,232,0.25)" }}>—</span>
+                                }
+                              </td>
+                              <td style={{ fontSize: 12, color: "rgba(201,209,232,0.5)" }}>
+                                {qf?.uploadedAt
+                                  ? new Date(qf.uploadedAt.seconds * 1000).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+                                  : <span style={{ color: "rgba(201,209,232,0.25)" }}>Not uploaded</span>
+                                }
+                              </td>
+                              <td>
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <input
+                                    ref={inputRef}
+                                    type="file"
+                                    accept=".json"
+                                    style={{ display: "none" }}
+                                    onChange={(e) => handleQFileUpload(e, cat, file)}
+                                  />
                                   <button
-                                    className="btn-edit"
-                                    style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.25)", color: "#f59e0b" }}
-                                    onClick={() => handleDownloadQuestionJson(q)}
-                                    title="Download JSON, edit in VS Code, then upload back"
+                                    className="btn-primary"
+                                    style={{ fontSize: 11, padding: "5px 12px" }}
+                                    onClick={() => inputRef.current?.click()}
+                                    disabled={qUploadingCat !== null}
                                   >
-                                    🔄 Update JSON
+                                    {qUploadingCat === cat ? "Uploading..." : qf ? "🔄 Re-upload" : "↑ Upload"}
                                   </button>
-                                  <button className="btn-del" onClick={() => setDeleteQConfirm(q.id)}>🗑</button>
+                                  {qf && (
+                                    <>
+                                      <button className="btn-edit" style={{ fontSize: 11 }} onClick={() => handleQFileDownload(cat)}>📥 Download</button>
+                                      <button className="btn-del" onClick={() => setDeleteQCatConfirm(cat)}>🗑</button>
+                                    </>
+                                  )}
                                 </div>
                               </td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </>
             )}
-          </div>
-        </div>
-      </div>
+
+          </div>   {/* end .main */}
+        </div>     {/* end .layout */}
+      </div>       {/* end .page */}
 
       {/* ── Report Detail Panel ── */}
       {selected && (
@@ -1246,54 +1068,7 @@ export default function FormsPage() {
         </div>
       )}
 
-      {/* ── Add / Edit Question Panel ── */}
-      {showAddForm && (
-        <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowAddForm(false)}>
-          <div className="detail-panel">
-            <div className="panel-header">
-              <div className="panel-title">{editingQuestion ? "✏ Edit Question" : "+ Add Question"}</div>
-              <button className="panel-close" onClick={() => setShowAddForm(false)}>×</button>
-            </div>
-            <div className="panel-body">
-              <div className="field-group">
-                <div className="field-label">Category</div>
-                <select className="field-input indigo" value={questionForm.category} onChange={(e) => setQuestionForm(p => ({ ...p, category: e.target.value }))}>
-                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div className="field-group">
-                <div className="field-label">Question Text</div>
-                <textarea className="field-input indigo" rows={4} placeholder="Enter question..." value={questionForm.questionText} onChange={(e) => setQuestionForm(p => ({ ...p, questionText: e.target.value }))} />
-              </div>
-              <div className="options-grid">
-                {(["A","B","C","D"] as const).map((letter) => {
-                  const key = `option${letter}` as keyof QuestionForm
-                  return (
-                    <div className="option-wrap" key={letter}>
-                      <div className="field-label">Option {letter}</div>
-                      <input className="field-input indigo" placeholder={`Option ${letter}`} value={questionForm[key] as string} onChange={(e) => setQuestionForm(p => ({ ...p, [key]: e.target.value }))} />
-                    </div>
-                  )
-                })}
-              </div>
-              <div className="field-group">
-                <div className="field-label">Correct Answer</div>
-                <div className="correct-select">
-                  {["A","B","C","D"].map((l, i) => (
-                    <button key={l} className={`correct-btn ${questionForm.correctAnswer === i ? "selected" : ""}`} onClick={() => setQuestionForm(p => ({ ...p, correctAnswer: i }))}>{l}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="panel-actions">
-              <button className="btn-save-indigo" disabled={savingQuestion || !formValid} onClick={handleSaveQuestion}>
-                {savingQuestion ? "Saving..." : editingQuestion ? "💾 Save Changes" : "✚ Add Question"}
-              </button>
-              <button className="btn-back" onClick={() => setShowAddForm(false)}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
+
 
       {/* Delete Report Confirm */}
       {deleteConfirm && (
@@ -1309,15 +1084,15 @@ export default function FormsPage() {
         </div>
       )}
 
-      {/* Delete Question Confirm */}
-      {deleteQConfirm && (
+      {/* Delete Question File Confirm */}
+      {deleteQCatConfirm && (
         <div className="confirm-overlay">
           <div className="confirm-box">
-            <div className="confirm-title">Delete Question?</div>
-            <div className="confirm-body">This will permanently remove the question from Firestore. Android app will no longer show it.</div>
+            <div className="confirm-title">Delete {deleteQCatConfirm} Questions?</div>
+            <div className="confirm-body">This will permanently remove all {deleteQCatConfirm} questions from Firestore. The Android app will fall back to local JSON.</div>
             <div className="confirm-btns" style={{ marginTop: 24 }}>
-              <button className="confirm-cancel" onClick={() => setDeleteQConfirm(null)}>Cancel</button>
-              <button className="confirm-delete" onClick={() => handleDeleteQuestion(deleteQConfirm)}>Delete</button>
+              <button className="confirm-cancel" onClick={() => setDeleteQCatConfirm(null)}>Cancel</button>
+              <button className="confirm-delete" onClick={() => handleQFileDelete(deleteQCatConfirm)}>Delete</button>
             </div>
           </div>
         </div>
