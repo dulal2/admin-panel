@@ -128,27 +128,25 @@ export default function FormsPage() {
   const fileInputRef                                = useRef<HTMLInputElement>(null)
 
   // ── Mock Tests ──
-  const [mockTests, setMockTests]                 = useState<MockTestPaper[]>([])
-  const [mockTestsLoading, setMockTestsLoading]   = useState(false)
-  const [mockUploadLoading, setMockUploadLoading] = useState(false)
-  const [mockUploadResult, setMockUploadResult]   = useState("")
-  const [deleteMockConfirm, setDeleteMockConfirm] = useState<string | null>(null)
-  const [editingMock, setEditingMock]             = useState<MockTestPaper | null>(null)
-  const [editMockName, setEditMockName]           = useState("")
-  const [savingMockName, setSavingMockName]       = useState(false)
-  const mockFileInputRef                          = useRef<HTMLInputElement>(null)
+  const [mockTests, setMockTests]                     = useState<MockTestPaper[]>([])
+  const [mockTestsLoading, setMockTestsLoading]       = useState(false)
+  const [mockUploadLoading, setMockUploadLoading]     = useState(false)
+  const [mockUploadResult, setMockUploadResult]       = useState("")
+  const [deleteMockConfirm, setDeleteMockConfirm]     = useState<string | null>(null)
+  const [editingMock, setEditingMock]                 = useState<MockTestPaper | null>(null)
+  const [editMockName, setEditMockName]               = useState("")
+  const [savingMockName, setSavingMockName]           = useState(false)
+  const mockFileInputRef                              = useRef<HTMLInputElement>(null)
 
   // ── JSON Update (Mock Tests) ──
-  // NEW: holds the mock test being edited via JSON download/reupload
-  const [updateMockTarget, setUpdateMockTarget]   = useState<MockTestPaper | null>(null)
-  const [mockUpdateLoading, setMockUpdateLoading] = useState(false)
-  const mockUpdateFileInputRef                    = useRef<HTMLInputElement>(null)
+  const [updateMockTarget, setUpdateMockTarget]       = useState<MockTestPaper | null>(null)
+  const [mockUpdateLoading, setMockUpdateLoading]     = useState(false)
+  const mockUpdateFileInputRef                        = useRef<HTMLInputElement>(null)
 
   // ── JSON Update (Questions) ──
-  // NEW: holds the question being edited via JSON download/reupload
-  const [updateQTarget, setUpdateQTarget]         = useState<FirestoreQuestion | null>(null)
-  const [qUpdateLoading, setQUpdateLoading]       = useState(false)
-  const qUpdateFileInputRef                       = useRef<HTMLInputElement>(null)
+  const [updateQTarget, setUpdateQTarget]             = useState<FirestoreQuestion | null>(null)
+  const [qUpdateLoading, setQUpdateLoading]           = useState(false)
+  const qUpdateFileInputRef                           = useRef<HTMLInputElement>(null)
 
   // ── Toast ──
   const [toast, setToast] = useState("")
@@ -358,36 +356,50 @@ export default function FormsPage() {
     setDeleteQConfirm(null)
   }
 
-  // ── JSON upload (bulk) ──
+  // ── JSON upload — writes directly to Firestore (no API route, same as mock tests) ──
   const handleJsonUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     setUploadLoading(true); setUploadResult("")
     try {
-      const text      = await file.text()
-      const parsed    = JSON.parse(text)
+      const text = await file.text()
+      const parsed = JSON.parse(text)
       const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
-      const category  = file.name.replace(".json", "").toUpperCase()
-        .replace("OPTG", "OPTG").replace("COMM", "COMM")
-        .replace("QUESTIONS", "Estd Rule").replace("RAJBHASA", "Rajbhasa")
 
-      const questions = raw.map((q: unknown) => {
+      // Auto-detect category from filename
+      const nameLower = file.name.replace(".json", "").toLowerCase()
+      let category = "OPTG"
+      if (nameLower.includes("comm"))                                   category = "COMM"
+      else if (nameLower.includes("raj") || nameLower.includes("rajbhasa")) category = "Rajbhasa"
+      else if (nameLower.includes("estd") || nameLower.includes("rule"))    category = "Estd Rule"
+      else if (nameLower.includes("optg"))                              category = "OPTG"
+
+      const validQuestions = raw.map((q: unknown) => {
         const item = q as Record<string, unknown>
         return {
           questionText:  (item.question ?? item.text ?? item.questionText ?? "") as string,
-          options:       item.options as string[],
+          options:       (item.options ?? []) as string[],
           correctAnswer: (item.correctAnswer ?? item.correctAnswerIndex ?? 0) as number,
           category,
         }
       }).filter(q => q.questionText && Array.isArray(q.options) && q.options.length === 4)
 
-      const res  = await fetch("/api/upload-questions", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ questions }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
-      setUploadResult(`✓ Uploaded ${data.uploaded} questions from ${file.name}`)
+      if (validQuestions.length === 0) throw new Error("No valid questions found in file")
+
+      // Write all directly to Firestore in parallel (same approach as mock tests)
+      await Promise.all(
+        validQuestions.map(q =>
+          addDoc(collection(db, "questions"), {
+            questionText:  q.questionText,
+            options:       q.options,
+            correctAnswer: q.correctAnswer,
+            category:      q.category,
+            createdAt:     Timestamp.now(),
+          })
+        )
+      )
+
+      setUploadResult(`✓ Uploaded ${validQuestions.length} questions from ${file.name}`)
       fetchQuestions()
     } catch (e: unknown) {
       setUploadResult(`⚠ ${e instanceof Error ? e.message : "Upload failed"}`)
@@ -424,6 +436,7 @@ export default function FormsPage() {
     try {
       const text   = await file.text()
       const parsed = JSON.parse(text)
+      // Support both flat array and {questions:[...]} shape
       const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
 
       const questions: MockTestQuestion[] = raw.map((q: unknown) => {
@@ -476,10 +489,7 @@ export default function FormsPage() {
     setDeleteMockConfirm(null)
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // NEW: Download JSON for editing in VS Code / any editor
-  // Mock Test: downloads using m.fileName (original uploaded filename)
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Download JSON for editing ──
   const handleDownloadMockJson = (m: MockTestPaper) => {
     const exportData = m.questions.map(q => ({
       text: q.text,
@@ -488,21 +498,13 @@ export default function FormsPage() {
     }))
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
     const url  = URL.createObjectURL(blob)
-    const a    = document.createElement("a")
-    a.href     = url
-    // Uses the original fileName stored in Firestore (e.g. "mock_test_1.json")
-    // Falls back to displayName with underscores if fileName is empty
+    const a    = document.createElement("a"); a.href = url
     a.download = m.fileName || `${m.displayName.replace(/\s+/g, "_")}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    a.click(); URL.revokeObjectURL(url)
     setUpdateMockTarget(m)
-    showToast(`📥 "${a.download}" downloaded — edit in VS Code, then upload back`)
+    showToast("📥 JSON downloaded — edit it, then click 'Upload Updated JSON'")
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // NEW: Download JSON for a single Question
-  // Filename format: question_<category>_<first6charsOfId>.json
-  // ─────────────────────────────────────────────────────────────────────────
   const handleDownloadQuestionJson = (q: FirestoreQuestion) => {
     const exportData = {
       id: q.id,
@@ -513,19 +515,14 @@ export default function FormsPage() {
     }
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
     const url  = URL.createObjectURL(blob)
-    const a    = document.createElement("a")
-    a.href     = url
-    // Readable filename: e.g. "question_OPTG_abc123.json"
-    a.download = `question_${q.category}_${q.id.slice(0, 6)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    const a    = document.createElement("a"); a.href = url
+    a.download = `question_${q.id}.json`
+    a.click(); URL.revokeObjectURL(url)
     setUpdateQTarget(q)
-    showToast(`📥 "${a.download}" downloaded — edit in VS Code, then upload back`)
+    showToast("📥 JSON downloaded — edit it, then click 'Upload Updated JSON'")
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // NEW: Re-upload edited Mock Test JSON → saves to Firestore
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Handle re-upload of edited JSON → Firestore ──
   const handleMockJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !updateMockTarget) return
@@ -556,7 +553,7 @@ export default function FormsPage() {
           ? { ...m, questions: updatedQuestions, totalQuestions: updatedQuestions.length }
           : m
       ))
-      showToast(`✓ "${updateMockTarget.displayName}" updated — ${updatedQuestions.length} questions saved to Firestore`)
+      showToast(`✓ Mock test updated — ${updatedQuestions.length} questions saved to Firestore`)
       setUpdateMockTarget(null)
     } catch (e: unknown) {
       showToast(`⚠ ${e instanceof Error ? e.message : "Update failed"}`)
@@ -566,9 +563,6 @@ export default function FormsPage() {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // NEW: Re-upload edited Question JSON → saves to Firestore
-  // ─────────────────────────────────────────────────────────────────────────
   const handleQuestionJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !updateQTarget) return
@@ -585,7 +579,7 @@ export default function FormsPage() {
       }
 
       if (!updatedData.questionText || !Array.isArray(updatedData.options) || updatedData.options.length !== 4)
-        throw new Error("Invalid question format — need questionText + 4 options")
+        throw new Error("Invalid question format in JSON")
 
       await updateDoc(doc(db, "questions", updateQTarget.id), updatedData)
 
@@ -676,19 +670,11 @@ export default function FormsPage() {
         .email-cell { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: rgba(140,155,200,0.8); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .date-cell { font-size: 11px; color: rgba(140,155,200,0.4); font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
         .delete-type-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); color: #ef4444; }
-        .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-        .btn-edit { padding: 5px 12px; border-radius: 6px; background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); color: #818cf8; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; transition: all 0.2s; white-space: nowrap; }
+        .row-actions { display: flex; gap: 6px; }
+        .btn-edit { padding: 5px 12px; border-radius: 6px; background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); color: #818cf8; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; transition: all 0.2s; }
         .btn-edit:hover { background: rgba(99,102,241,0.18); }
-        .btn-update-json { padding: 5px 12px; border-radius: 6px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.25); color: #f59e0b; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; transition: all 0.2s; white-space: nowrap; }
-        .btn-update-json:hover { background: rgba(245,158,11,0.18); }
         .btn-del { padding: 5px 12px; border-radius: 6px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); color: #f87171; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; transition: all 0.2s; white-space: nowrap; }
         .btn-del:hover { background: rgba(239,68,68,0.18); }
-        .update-banner { margin-bottom: 12px; padding: 12px 16px; background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.22); border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-        .update-banner-text { font-size: 12px; color: #f59e0b; }
-        .update-banner-actions { display: flex; gap: 8px; }
-        .btn-upload-json { padding: 7px 14px; border-radius: 8px; background: rgba(245,158,11,0.15); border: 1px solid rgba(245,158,11,0.35); color: #f59e0b; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; font-weight: 500; transition: all 0.2s; white-space: nowrap; }
-        .btn-upload-json:hover:not(:disabled) { background: rgba(245,158,11,0.25); }
-        .btn-upload-json:disabled { opacity: 0.4; cursor: not-allowed; }
         .empty { padding: 80px 20px; text-align: center; color: rgba(140,155,200,0.3); font-size: 13px; }
         .error-box { padding: 16px 20px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; color: #f87171; font-size: 13px; margin-bottom: 20px; }
         .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40; display: flex; align-items: flex-end; justify-content: flex-end; }
@@ -908,7 +894,7 @@ export default function FormsPage() {
                   <div className="empty">No mock tests yet. Upload a JSON file to add one.</div>
                 ) : (
                   <>
-                    {/* NEW: Hidden file input for re-uploading edited mock test JSON */}
+                    {/* Hidden file input for JSON re-upload */}
                     <input
                       ref={mockUpdateFileInputRef}
                       type="file"
@@ -917,69 +903,72 @@ export default function FormsPage() {
                       onChange={handleMockJsonReupload}
                     />
 
-                    {/* NEW: Amber banner shown after clicking "Update JSON" — prompts upload */}
+                    {/* Update pending banner */}
                     {updateMockTarget && (
-                      <div className="update-banner">
-                        <span className="update-banner-text">
-                          📝 Editing: <strong>{updateMockTarget.displayName}</strong>
-                          &nbsp;({updateMockTarget.fileName}) — Edit the downloaded JSON in VS Code, then upload it back.
+                      <div style={{ marginBottom: 12, padding: "12px 16px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                        <span style={{ fontSize: 12, color: "#f59e0b" }}>
+                          📝 Editing: <strong>{updateMockTarget.displayName}</strong> — Edit the downloaded JSON, then upload it back.
                         </span>
-                        <div className="update-banner-actions">
+                        <div style={{ display: "flex", gap: 8 }}>
                           <button
-                            className="btn-upload-json"
+                            className="btn-primary"
+                            style={{ background: "rgba(245,158,11,0.15)", borderColor: "rgba(245,158,11,0.35)", color: "#f59e0b" }}
                             disabled={mockUpdateLoading}
                             onClick={() => mockUpdateFileInputRef.current?.click()}
                           >
-                            {mockUpdateLoading ? "Saving to Firestore..." : "⬆ Upload Updated JSON"}
+                            {mockUpdateLoading ? "Saving..." : "⬆ Upload Updated JSON"}
                           </button>
                           <button className="btn-secondary" style={{ fontSize: 11, padding: "5px 10px" }} onClick={() => setUpdateMockTarget(null)}>✕ Cancel</button>
                         </div>
                       </div>
                     )}
 
-                    <div className="table-wrap">
-                      <table className="table">
-                        <thead><tr><th>Display Name</th><th>File Name</th><th>Questions</th><th>Uploaded</th><th>Actions</th></tr></thead>
-                        <tbody>
-                          {mockTests.map((m) => (
-                            <tr key={m.id}>
-                              <td>
-                                {editingMock?.id === m.id ? (
-                                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                    <input
-                                      className="search-input"
-                                      style={{ width: 200 }}
-                                      value={editMockName}
-                                      onChange={(e) => setEditMockName(e.target.value)}
-                                      onKeyDown={(e) => e.key === "Enter" && handleSaveMockName()}
-                                      autoFocus
-                                    />
-                                    <button className="btn-edit" onClick={handleSaveMockName} disabled={savingMockName}>{savingMockName ? "..." : "✓"}</button>
-                                    <button className="btn-secondary" style={{ padding: "5px 10px", fontSize: 11 }} onClick={() => setEditingMock(null)}>✕</button>
-                                  </div>
-                                ) : (
-                                  <span style={{ color: "#c9d1e8", fontWeight: 500 }}>{m.displayName}</span>
-                                )}
-                              </td>
-                              {/* File name column — this is what the downloaded JSON will be named */}
-                              <td><span className="cat-tag">{m.fileName}</span></td>
-                              <td><span className="correct-badge">{m.totalQuestions}</span></td>
-                              <td><div className="date-cell">{m.createdAt ? formatDate(m.createdAt) : "—"}</div></td>
-                              <td>
-                                <div className="row-actions">
-                                  <button className="btn-edit" onClick={() => { setEditingMock(m); setEditMockName(m.displayName) }}>✏ Rename</button>
-                                  {/* NEW: Downloads JSON named after m.fileName, sets updateMockTarget */}
-                                  <button className="btn-update-json" onClick={() => handleDownloadMockJson(m)} title={`Download ${m.fileName}, edit in VS Code, upload back`}>
-                                    🔄 Update JSON
-                                  </button>
-                                  <button className="btn-del" onClick={() => setDeleteMockConfirm(m.id)}>🗑</button>
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead><tr><th>Display Name</th><th>File Name</th><th>Questions</th><th>Uploaded</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {mockTests.map((m) => (
+                          <tr key={m.id}>
+                            <td>
+                              {editingMock?.id === m.id ? (
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <input
+                                    className="search-input"
+                                    style={{ width: 200 }}
+                                    value={editMockName}
+                                    onChange={(e) => setEditMockName(e.target.value)}
+                                    onKeyDown={(e) => e.key === "Enter" && handleSaveMockName()}
+                                    autoFocus
+                                  />
+                                  <button className="btn-edit" onClick={handleSaveMockName} disabled={savingMockName}>{savingMockName ? "..." : "✓"}</button>
+                                  <button className="btn-secondary" style={{ padding: "5px 10px", fontSize: 11 }} onClick={() => setEditingMock(null)}>✕</button>
                                 </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                              ) : (
+                                <span style={{ color: "#c9d1e8", fontWeight: 500 }}>{m.displayName}</span>
+                              )}
+                            </td>
+                            <td><span className="cat-tag">{m.fileName}</span></td>
+                            <td><span className="correct-badge">{m.totalQuestions}</span></td>
+                            <td><div className="date-cell">{m.createdAt ? formatDate(m.createdAt) : "—"}</div></td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="btn-edit" onClick={() => { setEditingMock(m); setEditMockName(m.displayName) }}>✏ Rename</button>
+                                <button
+                                  className="btn-edit"
+                                  style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.25)", color: "#f59e0b" }}
+                                  onClick={() => handleDownloadMockJson(m)}
+                                  title="Download JSON, edit in VS Code, then upload back"
+                                >
+                                  🔄 Update JSON
+                                </button>
+                                <button className="btn-del" onClick={() => setDeleteMockConfirm(m.id)}>🗑</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                   </>
                 )}
               </>
@@ -988,7 +977,7 @@ export default function FormsPage() {
             {/* QUESTIONS */}
             {activeSection === "questions" && (
               <>
-                {/* Upload JSON box (bulk) */}
+                {/* Upload JSON box */}
                 <div className="upload-box">
                   <span className="upload-label">📂 Upload JSON file to migrate questions:</span>
                   <input ref={fileInputRef} type="file" accept=".json" style={{ display: "none" }} onChange={handleJsonUpload} />
@@ -1021,7 +1010,7 @@ export default function FormsPage() {
                   <>
                     <div className="q-count" style={{ marginBottom: 12 }}>Showing {filteredQuestions.length} of {questions.length} questions</div>
 
-                    {/* NEW: Hidden file input for re-uploading edited question JSON */}
+                    {/* Hidden file input for question JSON re-upload */}
                     <input
                       ref={qUpdateFileInputRef}
                       type="file"
@@ -1030,20 +1019,20 @@ export default function FormsPage() {
                       onChange={handleQuestionJsonReupload}
                     />
 
-                    {/* NEW: Amber banner shown after clicking "Update JSON" on a question */}
+                    {/* Update pending banner */}
                     {updateQTarget && (
-                      <div className="update-banner">
-                        <span className="update-banner-text">
-                          📝 Editing: <strong>question_{updateQTarget.category}_{updateQTarget.id.slice(0, 6)}.json</strong>
-                          &nbsp;— Edit the downloaded JSON in VS Code, then upload it back.
+                      <div style={{ marginBottom: 12, padding: "12px 16px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                        <span style={{ fontSize: 12, color: "#f59e0b" }}>
+                          📝 Editing question — Edit the downloaded JSON in VS Code, then upload it back.
                         </span>
-                        <div className="update-banner-actions">
+                        <div style={{ display: "flex", gap: 8 }}>
                           <button
-                            className="btn-upload-json"
+                            className="btn-primary"
+                            style={{ background: "rgba(245,158,11,0.15)", borderColor: "rgba(245,158,11,0.35)", color: "#f59e0b" }}
                             disabled={qUpdateLoading}
                             onClick={() => qUpdateFileInputRef.current?.click()}
                           >
-                            {qUpdateLoading ? "Saving to Firestore..." : "⬆ Upload Updated JSON"}
+                            {qUpdateLoading ? "Saving..." : "⬆ Upload Updated JSON"}
                           </button>
                           <button className="btn-secondary" style={{ fontSize: 11, padding: "5px 10px" }} onClick={() => setUpdateQTarget(null)}>✕ Cancel</button>
                         </div>
@@ -1063,11 +1052,11 @@ export default function FormsPage() {
                               <td>
                                 <div className="row-actions">
                                   <button className="btn-edit" onClick={() => openEditForm(q)}>✏ Edit</button>
-                                  {/* NEW: Downloads question_<category>_<id6>.json, sets updateQTarget */}
                                   <button
-                                    className="btn-update-json"
+                                    className="btn-edit"
+                                    style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.25)", color: "#f59e0b" }}
                                     onClick={() => handleDownloadQuestionJson(q)}
-                                    title={`Download question_${q.category}_${q.id.slice(0,6)}.json, edit in VS Code, upload back`}
+                                    title="Download JSON, edit in VS Code, then upload back"
                                   >
                                     🔄 Update JSON
                                   </button>
