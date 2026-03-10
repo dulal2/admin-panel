@@ -125,11 +125,16 @@ export default function FormsPage() {
   const [deleteQConfirm, setDeleteQConfirm]         = useState<string | null>(null)
   const [uploadLoading, setUploadLoading]           = useState(false)
   const [uploadResult, setUploadResult]             = useState("")
-  // Category-specific upload refs
+  // Category-specific upload refs (add)
   const fileInputOPTG                               = useRef<HTMLInputElement>(null)
   const fileInputCOMM                               = useRef<HTMLInputElement>(null)
   const fileInputEstd                               = useRef<HTMLInputElement>(null)
   const fileInputRaj                                = useRef<HTMLInputElement>(null)
+  // Category-specific replace refs (delete old + upload new)
+  const fileReplaceOPTG                             = useRef<HTMLInputElement>(null)
+  const fileReplaceCOMM                             = useRef<HTMLInputElement>(null)
+  const fileReplaceEstd                             = useRef<HTMLInputElement>(null)
+  const fileReplaceRaj                              = useRef<HTMLInputElement>(null)
 
   // ── Mock Tests ──
   const [mockTests, setMockTests]                     = useState<MockTestPaper[]>([])
@@ -390,7 +395,7 @@ export default function FormsPage() {
             questionText:  q.questionText,
             options:       q.options,
             correctAnswer: q.correctAnswer,
-            category:      q.category,
+            category:      category,   // always use the button's fixed category
             createdAt:     Timestamp.now(),
           })
         )
@@ -411,6 +416,53 @@ export default function FormsPage() {
   const handleUploadCOMM        = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "COMM",      fileInputCOMM) }
   const handleUploadEstd        = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "Estd Rule", fileInputEstd) }
   const handleUploadRaj         = async (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) await uploadQuestionsWithCategory(f, "Rajbhasa",  fileInputRaj)  }
+
+  // Delete ALL questions for a category then re-upload (clean replace)
+  const handleReplaceCategory = async (file: File, category: string, inputRef: React.RefObject<HTMLInputElement | null>) => {
+    setUploadLoading(true); setUploadResult("")
+    try {
+      // Step 1: delete all existing docs for this category
+      const snap = await getDocs(collection(db, "questions"))
+      const toDelete = snap.docs.filter(d => d.data().category === category)
+      await Promise.all(toDelete.map(d => deleteDoc(doc(db, "questions", d.id))))
+
+      // Step 2: parse and upload new questions
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const raw: unknown[] = Array.isArray(parsed) ? parsed : parsed.questions ?? []
+
+      const validQuestions = raw.map((q: unknown) => {
+        const item = q as Record<string, unknown>
+        return {
+          questionText:  (item.question ?? item.text ?? item.questionText ?? "") as string,
+          options:       (item.options ?? []) as string[],
+          correctAnswer: (item.correctAnswer ?? item.correctAnswerIndex ?? 0) as number,
+        }
+      }).filter(q => q.questionText && Array.isArray(q.options) && q.options.length === 4)
+
+      if (validQuestions.length === 0) throw new Error("No valid questions found in file")
+
+      await Promise.all(
+        validQuestions.map(q =>
+          addDoc(collection(db, "questions"), {
+            questionText:  q.questionText,
+            options:       q.options,
+            correctAnswer: q.correctAnswer,
+            category:      category,
+            createdAt:     Timestamp.now(),
+          })
+        )
+      )
+
+      setUploadResult(`✓ Replaced [${category}]: deleted ${toDelete.length} old, uploaded ${validQuestions.length} new questions`)
+      fetchQuestions()
+    } catch (e: unknown) {
+      setUploadResult(`⚠ ${e instanceof Error ? e.message : "Replace failed"}`)
+    } finally {
+      setUploadLoading(false)
+      if (inputRef.current) inputRef.current.value = ""
+    }
+  }
 
   // ── Mock Tests CRUD ──
   const fetchMockTests = async () => {
@@ -990,45 +1042,34 @@ export default function FormsPage() {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
 
-                    {/* OPTG */}
-                    <div style={{ padding: "14px 16px", background: "rgba(99,102,241,0.06)", border: "1px dashed rgba(99,102,241,0.25)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: "#818cf8", fontFamily: "'IBM Plex Mono', monospace" }}>OPTG</div>
-                      <div style={{ fontSize: 11, color: "rgba(140,155,200,0.4)" }}>optg.json</div>
-                      <input ref={fileInputOPTG} type="file" accept=".json" style={{ display: "none" }} onChange={handleUploadOPTG} />
-                      <button className="btn-primary" style={{ fontSize: 11, padding: "6px 10px" }} onClick={() => fileInputOPTG.current?.click()} disabled={uploadLoading}>
-                        ↑ Upload
-                      </button>
-                    </div>
-
-                    {/* COMM */}
-                    <div style={{ padding: "14px 16px", background: "rgba(16,185,129,0.06)", border: "1px dashed rgba(16,185,129,0.25)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: "#10b981", fontFamily: "'IBM Plex Mono', monospace" }}>COMM</div>
-                      <div style={{ fontSize: 11, color: "rgba(140,155,200,0.4)" }}>comm.json</div>
-                      <input ref={fileInputCOMM} type="file" accept=".json" style={{ display: "none" }} onChange={handleUploadCOMM} />
-                      <button className="btn-primary" style={{ fontSize: 11, padding: "6px 10px", background: "rgba(16,185,129,0.12)", borderColor: "rgba(16,185,129,0.3)", color: "#10b981" }} onClick={() => fileInputCOMM.current?.click()} disabled={uploadLoading}>
-                        ↑ Upload
-                      </button>
-                    </div>
-
-                    {/* Estd Rule */}
-                    <div style={{ padding: "14px 16px", background: "rgba(245,158,11,0.06)", border: "1px dashed rgba(245,158,11,0.25)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", fontFamily: "'IBM Plex Mono', monospace" }}>Estd Rule</div>
-                      <div style={{ fontSize: 11, color: "rgba(140,155,200,0.4)" }}>estd.json</div>
-                      <input ref={fileInputEstd} type="file" accept=".json" style={{ display: "none" }} onChange={handleUploadEstd} />
-                      <button className="btn-primary" style={{ fontSize: 11, padding: "6px 10px", background: "rgba(245,158,11,0.12)", borderColor: "rgba(245,158,11,0.3)", color: "#f59e0b" }} onClick={() => fileInputEstd.current?.click()} disabled={uploadLoading}>
-                        ↑ Upload
-                      </button>
-                    </div>
-
-                    {/* Rajbhasa */}
-                    <div style={{ padding: "14px 16px", background: "rgba(239,68,68,0.06)", border: "1px dashed rgba(239,68,68,0.25)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: "#f87171", fontFamily: "'IBM Plex Mono', monospace" }}>Rajbhasa</div>
-                      <div style={{ fontSize: 11, color: "rgba(140,155,200,0.4)" }}>rajbhasa.json</div>
-                      <input ref={fileInputRaj} type="file" accept=".json" style={{ display: "none" }} onChange={handleUploadRaj} />
-                      <button className="btn-primary" style={{ fontSize: 11, padding: "6px 10px", background: "rgba(239,68,68,0.12)", borderColor: "rgba(239,68,68,0.3)", color: "#f87171" }} onClick={() => fileInputRaj.current?.click()} disabled={uploadLoading}>
-                        ↑ Upload
-                      </button>
-                    </div>
+                    {[
+                      { cat: "OPTG",      color: "#818cf8", bg: "rgba(99,102,241,0.06)",  border: "rgba(99,102,241,0.25)",  file: "optg.json",     addRef: fileInputOPTG,  repRef: fileReplaceOPTG, onAdd: handleUploadOPTG,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "OPTG",      fileReplaceOPTG) } },
+                      { cat: "COMM",      color: "#10b981", bg: "rgba(16,185,129,0.06)",  border: "rgba(16,185,129,0.25)",  file: "comm.json",     addRef: fileInputCOMM,  repRef: fileReplaceCOMM, onAdd: handleUploadCOMM,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "COMM",      fileReplaceCOMM) } },
+                      { cat: "Estd Rule", color: "#f59e0b", bg: "rgba(245,158,11,0.06)",  border: "rgba(245,158,11,0.25)",  file: "estd.json",     addRef: fileInputEstd,  repRef: fileReplaceEstd, onAdd: handleUploadEstd,  onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "Estd Rule", fileReplaceEstd) } },
+                      { cat: "Rajbhasa", color: "#f87171", bg: "rgba(239,68,68,0.06)",   border: "rgba(239,68,68,0.25)",   file: "rajbhasa.json", addRef: fileInputRaj,   repRef: fileReplaceRaj,  onAdd: handleUploadRaj,   onRep: (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) handleReplaceCategory(f, "Rajbhasa",  fileReplaceRaj)  } },
+                    ].map(({ cat, color, bg, border, file, addRef, repRef, onAdd, onRep }) => (
+                      <div key={cat} style={{ padding: "14px 16px", background: bg, border: `1px dashed ${border}`, borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color, fontFamily: "'IBM Plex Mono', monospace" }}>{cat}</div>
+                        <div style={{ fontSize: 10, color: "rgba(140,155,200,0.4)" }}>{file}</div>
+                        {/* Add — appends new questions without deleting existing */}
+                        <input ref={addRef} type="file" accept=".json" style={{ display: "none" }} onChange={onAdd} />
+                        <button
+                          style={{ padding: "5px 8px", borderRadius: 6, background: `${bg.replace("0.06", "0.12")}`, border: `1px solid ${border}`, color, cursor: "pointer", fontFamily: "'IBM Plex Sans', sans-serif", fontSize: 11, fontWeight: 500 }}
+                          onClick={() => addRef.current?.click()} disabled={uploadLoading}
+                        >
+                          ＋ Add Questions
+                        </button>
+                        {/* Replace — deletes all existing for this category then uploads fresh */}
+                        <input ref={repRef} type="file" accept=".json" style={{ display: "none" }} onChange={onRep} />
+                        <button
+                          style={{ padding: "5px 8px", borderRadius: 6, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#f87171", cursor: "pointer", fontFamily: "'IBM Plex Sans', sans-serif", fontSize: 11, fontWeight: 500 }}
+                          onClick={() => repRef.current?.click()} disabled={uploadLoading}
+                          title="Deletes ALL existing questions in this category, then uploads the new file"
+                        >
+                          🔄 Replace All
+                        </button>
+                      </div>
+                    ))}
 
                   </div>
                   {uploadResult && (
