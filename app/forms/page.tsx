@@ -4,7 +4,7 @@ import { db } from "@/lib/auth"
 import { useState, useEffect, useRef } from "react"
 import {
   collection, query, orderBy, onSnapshot,
-  doc, updateDoc, deleteDoc, setDoc, addDoc, getDocs, Timestamp,
+  doc, updateDoc, deleteDoc, setDoc, addDoc, getDocs, Timestamp, writeBatch,
 } from "firebase/firestore"
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -43,6 +43,7 @@ interface MockTestPaper {
   questions: MockTestQuestion[]
   totalQuestions: number
   createdAt: Timestamp
+  order?: number
 }
 
 interface QuestionFile {
@@ -142,12 +143,17 @@ export default function FormsPage() {
   const [savingMockName, setSavingMockName]           = useState(false)
   const mockFileInputRef                              = useRef<HTMLInputElement>(null)
 
+  // ── Mock Test Reorder ──
+  const [selectedMockId, setSelectedMockId]   = useState<string | null>(null)
+  const [draggingMockId, setDraggingMockId]   = useState<string | null>(null)
+  const [dragOverMockId, setDragOverMockId]   = useState<string | null>(null)
+  const [savingOrder, setSavingOrder]         = useState(false)
+  const [orderDirty, setOrderDirty]           = useState(false)
+
   // ── JSON Update (Mock Tests) ──
   const [updateMockTarget, setUpdateMockTarget]       = useState<MockTestPaper | null>(null)
   const [mockUpdateLoading, setMockUpdateLoading]     = useState(false)
   const mockUpdateFileInputRef                        = useRef<HTMLInputElement>(null)
-
-  // ── JSON Update (Questions) ──
 
   // ── Toast ──
   const [toast, setToast] = useState("")
@@ -381,19 +387,24 @@ export default function FormsPage() {
     setDeleteQCatConfirm(null)
   }
 
-    // ── Mock Tests CRUD ──
+  // ── Mock Tests CRUD ──
   const fetchMockTests = async () => {
     setMockTestsLoading(true)
     try {
       const snap = await getDocs(collection(db, "mock_tests"))
-      setMockTests(snap.docs.map(d => ({
+      const tests = snap.docs.map(d => ({
         id: d.id,
         fileName:       d.data().fileName       ?? "",
         displayName:    d.data().displayName    ?? "",
         questions:      d.data().questions      ?? [],
         totalQuestions: d.data().totalQuestions ?? 0,
         createdAt:      d.data().createdAt,
-      })))
+        order:          d.data().order          ?? 9999,
+      }))
+      // Sort by order field if present, otherwise preserve fetch order
+      tests.sort((a, b) => (a.order ?? 9999) - (b.order ?? 9999))
+      setMockTests(tests)
+      setOrderDirty(false)
     } catch {
       showToast("⚠ Failed to load mock tests")
     } finally { setMockTestsLoading(false) }
@@ -427,6 +438,7 @@ export default function FormsPage() {
 
       const fileName    = file.name
       const displayName = fileName.replace(".json", "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())
+      const newOrder    = mockTests.length  // append at end
 
       const ref = await addDoc(collection(db, "mock_tests"), {
         fileName,
@@ -434,9 +446,10 @@ export default function FormsPage() {
         questions,
         totalQuestions: questions.length,
         createdAt: Timestamp.now(),
+        order: newOrder,
       })
 
-      setMockTests(prev => [...prev, { id: ref.id, fileName, displayName, questions, totalQuestions: questions.length, createdAt: Timestamp.now() }])
+      setMockTests(prev => [...prev, { id: ref.id, fileName, displayName, questions, totalQuestions: questions.length, createdAt: Timestamp.now(), order: newOrder }])
       setMockUploadResult(`✓ Uploaded "${displayName}" with ${questions.length} questions`)
     } catch (e: unknown) {
       setMockUploadResult(`⚠ ${e instanceof Error ? e.message : "Upload failed"}`)
@@ -459,6 +472,7 @@ export default function FormsPage() {
     try {
       await deleteDoc(doc(db, "mock_tests", id))
       setMockTests(prev => prev.filter(m => m.id !== id))
+      if (selectedMockId === id) setSelectedMockId(null)
       showToast("✓ Mock test deleted")
     } catch { showToast("⚠ Failed to delete") }
     setDeleteMockConfirm(null)
@@ -480,7 +494,7 @@ export default function FormsPage() {
     showToast("📥 JSON downloaded — edit it, then click 'Upload Updated JSON'")
   }
 
-    const handleMockJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMockJsonReupload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !updateMockTarget) return
     setMockUpdateLoading(true)
@@ -520,8 +534,64 @@ export default function FormsPage() {
     }
   }
 
+  // ── Mock Test Reorder ──
+  const selectedMockIdx = mockTests.findIndex(m => m.id === selectedMockId)
 
+  const moveMockUp = () => {
+    if (selectedMockIdx <= 0) return
+    const next = [...mockTests]
+    ;[next[selectedMockIdx - 1], next[selectedMockIdx]] = [next[selectedMockIdx], next[selectedMockIdx - 1]]
+    setMockTests(next)
+    setOrderDirty(true)
+    showToast(`↑ Moved "${mockTests[selectedMockIdx].displayName}" up`)
+  }
 
+  const moveMockDown = () => {
+    if (selectedMockIdx < 0 || selectedMockIdx >= mockTests.length - 1) return
+    const next = [...mockTests]
+    ;[next[selectedMockIdx + 1], next[selectedMockIdx]] = [next[selectedMockIdx], next[selectedMockIdx + 1]]
+    setMockTests(next)
+    setOrderDirty(true)
+    showToast(`↓ Moved "${mockTests[selectedMockIdx].displayName}" down`)
+  }
+
+  const handleSaveMockOrder = async () => {
+    setSavingOrder(true)
+    try {
+      const batch = writeBatch(db)
+      mockTests.forEach((m, idx) => {
+        batch.update(doc(db, "mock_tests", m.id), { order: idx })
+      })
+      await batch.commit()
+      setMockTests(prev => prev.map((m, idx) => ({ ...m, order: idx })))
+      setOrderDirty(false)
+      showToast("✓ Order saved to Firestore")
+    } catch (e: unknown) {
+      showToast(`⚠ ${e instanceof Error ? e.message : "Failed to save order"}`)
+    } finally { setSavingOrder(false) }
+  }
+
+  // Drag-and-drop handlers
+  const onMockDragStart = (id: string) => setDraggingMockId(id)
+  const onMockDragEnd   = () => { setDraggingMockId(null); setDragOverMockId(null) }
+  const onMockDragOver  = (e: React.DragEvent, id: string) => { e.preventDefault(); setDragOverMockId(id) }
+  const onMockDrop      = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault()
+    if (!draggingMockId || draggingMockId === targetId) return
+    const from = mockTests.findIndex(m => m.id === draggingMockId)
+    const to   = mockTests.findIndex(m => m.id === targetId)
+    const next = [...mockTests]
+    const [item] = next.splice(from, 1)
+    next.splice(to, 0, item)
+    setMockTests(next)
+    setSelectedMockId(draggingMockId)
+    setOrderDirty(true)
+    showToast("⇅ Order updated by drag")
+    setDraggingMockId(null); setDragOverMockId(null)
+  }
+
+  const canMoveUp   = selectedMockIdx > 0
+  const canMoveDown = selectedMockIdx >= 0 && selectedMockIdx < mockTests.length - 1
 
   return (
     <>
@@ -662,6 +732,26 @@ export default function FormsPage() {
         .spinner { width: 12px; height: 12px; border: 2px solid rgba(248,113,113,0.3); border-top-color: #f87171; border-radius: 50%; animation: spin 0.7s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .q-count { font-size: 11px; color: rgba(140,155,200,0.4); font-family: 'IBM Plex Mono', monospace; }
+
+        /* ── Mock test reorder styles ── */
+        .mock-row-selected td { background: rgba(99,102,241,0.06) !important; }
+        .mock-row-selected td:first-child { box-shadow: inset 3px 0 0 #818cf8; }
+        .mock-row-dragging { opacity: 0.35; }
+        .mock-row-dragover td { background: rgba(245,158,11,0.05) !important; border-top: 2px solid rgba(245,158,11,0.5) !important; }
+        .drag-handle-cell { cursor: grab; color: rgba(140,155,200,0.25); font-size: 13px; padding-right: 4px !important; user-select: none; transition: color 0.15s; }
+        .mock-row-selected .drag-handle-cell,
+        tr:hover .drag-handle-cell { color: rgba(140,155,200,0.55); }
+        .drag-handle-cell:active { cursor: grabbing; }
+        .pos-num { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: rgba(140,155,200,0.3); width: 18px; text-align: right; }
+        .mock-row-selected .pos-num { color: #818cf8; }
+        .btn-move { padding: 4px 9px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.22); background: rgba(99,102,241,0.07); color: #818cf8; cursor: pointer; font-size: 11px; transition: all 0.15s; line-height: 1; }
+        .btn-move:hover:not(:disabled) { background: rgba(99,102,241,0.18); }
+        .btn-move:disabled { opacity: 0.18; cursor: not-allowed; }
+        .btn-save-order { padding: 7px 14px; border-radius: 8px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.28); color: #10b981; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+        .btn-save-order:hover:not(:disabled) { background: rgba(16,185,129,0.2); }
+        .btn-save-order:disabled { opacity: 0.35; cursor: not-allowed; }
+        .order-spinner { width: 11px; height: 11px; border: 1.5px solid rgba(16,185,129,0.3); border-top-color: #10b981; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        .reorder-hint { font-size: 11px; color: rgba(140,155,200,0.3); font-family: 'IBM Plex Mono', monospace; }
       `}</style>
 
       <div className="page">
@@ -810,8 +900,28 @@ export default function FormsPage() {
                 </div>
 
                 <div className="section-header">
-                  <span className="section-title">Mock Test Papers ({mockTests.length})</span>
-                  <button className="btn-secondary" onClick={fetchMockTests}>↻ Refresh</button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <span className="section-title">Mock Test Papers ({mockTests.length})</span>
+                    {mockTests.length > 1 && (
+                      <span className="reorder-hint">click row to select · ↑↓ to reorder · drag to rearrange</span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    {/* Move buttons — shown when a row is selected */}
+                    {selectedMockId && (
+                      <>
+                        <button className="btn-move" disabled={!canMoveUp} onClick={moveMockUp} title="Move up">↑ Up</button>
+                        <button className="btn-move" disabled={!canMoveDown} onClick={moveMockDown} title="Move down">↓ Down</button>
+                      </>
+                    )}
+                    {/* Save order button — shown when order has changed */}
+                    {orderDirty && (
+                      <button className="btn-save-order" disabled={savingOrder} onClick={handleSaveMockOrder}>
+                        {savingOrder ? <><div className="order-spinner" /> Saving...</> : "💾 Save Order"}
+                      </button>
+                    )}
+                    <button className="btn-secondary" onClick={fetchMockTests}>↻ Refresh</button>
+                  </div>
                 </div>
 
                 {mockTestsLoading ? <div className="empty">Loading mock tests...</div>
@@ -850,47 +960,88 @@ export default function FormsPage() {
 
                   <div className="table-wrap">
                     <table className="table">
-                      <thead><tr><th>Display Name</th><th>File Name</th><th>Questions</th><th>Uploaded</th><th>Actions</th></tr></thead>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 28 }}></th>{/* drag handle */}
+                          <th style={{ width: 32 }}>#</th>
+                          <th>Display Name</th>
+                          <th>File Name</th>
+                          <th>Questions</th>
+                          <th>Uploaded</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {mockTests.map((m) => (
-                          <tr key={m.id}>
-                            <td>
-                              {editingMock?.id === m.id ? (
-                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                  <input
-                                    className="search-input"
-                                    style={{ width: 200 }}
-                                    value={editMockName}
-                                    onChange={(e) => setEditMockName(e.target.value)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleSaveMockName()}
-                                    autoFocus
-                                  />
-                                  <button className="btn-edit" onClick={handleSaveMockName} disabled={savingMockName}>{savingMockName ? "..." : "✓"}</button>
-                                  <button className="btn-secondary" style={{ padding: "5px 10px", fontSize: 11 }} onClick={() => setEditingMock(null)}>✕</button>
+                        {mockTests.map((m, idx) => {
+                          const isSelected    = selectedMockId === m.id
+                          const isDragging    = draggingMockId === m.id
+                          const isDragTarget  = dragOverMockId === m.id && draggingMockId !== m.id
+                          return (
+                            <tr
+                              key={m.id}
+                              className={[
+                                isSelected   ? "mock-row-selected" : "",
+                                isDragging   ? "mock-row-dragging"  : "",
+                                isDragTarget ? "mock-row-dragover"  : "",
+                              ].join(" ")}
+                              style={{ cursor: "pointer" }}
+                              onClick={() => setSelectedMockId(isSelected ? null : m.id)}
+                              draggable
+                              onDragStart={() => onMockDragStart(m.id)}
+                              onDragEnd={onMockDragEnd}
+                              onDragOver={(e) => onMockDragOver(e, m.id)}
+                              onDrop={(e) => onMockDrop(e, m.id)}
+                            >
+                              {/* Drag handle */}
+                              <td className="drag-handle-cell" onClick={e => e.stopPropagation()} title="Drag to reorder">⠿</td>
+                              {/* Position */}
+                              <td><span className="pos-num">{idx + 1}</span></td>
+                              {/* Display Name */}
+                              <td>
+                                {editingMock?.id === m.id ? (
+                                  <div style={{ display: "flex", gap: 6, alignItems: "center" }} onClick={e => e.stopPropagation()}>
+                                    <input
+                                      className="search-input"
+                                      style={{ width: 200 }}
+                                      value={editMockName}
+                                      onChange={(e) => setEditMockName(e.target.value)}
+                                      onKeyDown={(e) => e.key === "Enter" && handleSaveMockName()}
+                                      autoFocus
+                                    />
+                                    <button className="btn-edit" onClick={handleSaveMockName} disabled={savingMockName}>{savingMockName ? "..." : "✓"}</button>
+                                    <button className="btn-secondary" style={{ padding: "5px 10px", fontSize: 11 }} onClick={() => setEditingMock(null)}>✕</button>
+                                  </div>
+                                ) : (
+                                  <span style={{ color: "#c9d1e8", fontWeight: 500 }}>{m.displayName}</span>
+                                )}
+                              </td>
+                              <td><span className="cat-tag">{m.fileName}</span></td>
+                              <td><span className="correct-badge">{m.totalQuestions}</span></td>
+                              <td><div className="date-cell">{m.createdAt ? formatDate(m.createdAt) : "—"}</div></td>
+                              <td>
+                                <div className="row-actions" onClick={e => e.stopPropagation()}>
+                                  {/* Inline move buttons — only on selected row */}
+                                  {isSelected && (
+                                    <>
+                                      <button className="btn-move" disabled={idx === 0} onClick={moveMockUp} title="Move up">↑</button>
+                                      <button className="btn-move" disabled={idx === mockTests.length - 1} onClick={moveMockDown} title="Move down">↓</button>
+                                    </>
+                                  )}
+                                  <button className="btn-edit" onClick={() => { setEditingMock(m); setEditMockName(m.displayName) }}>✏ Rename</button>
+                                  <button
+                                    className="btn-edit"
+                                    style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.25)", color: "#f59e0b" }}
+                                    onClick={() => handleDownloadMockJson(m)}
+                                    title="Download JSON, edit in VS Code, then upload back"
+                                  >
+                                    🔄 Update JSON
+                                  </button>
+                                  <button className="btn-del" onClick={() => setDeleteMockConfirm(m.id)}>🗑</button>
                                 </div>
-                              ) : (
-                                <span style={{ color: "#c9d1e8", fontWeight: 500 }}>{m.displayName}</span>
-                              )}
-                            </td>
-                            <td><span className="cat-tag">{m.fileName}</span></td>
-                            <td><span className="correct-badge">{m.totalQuestions}</span></td>
-                            <td><div className="date-cell">{m.createdAt ? formatDate(m.createdAt) : "—"}</div></td>
-                            <td>
-                              <div className="row-actions">
-                                <button className="btn-edit" onClick={() => { setEditingMock(m); setEditMockName(m.displayName) }}>✏ Rename</button>
-                                <button
-                                  className="btn-edit"
-                                  style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.25)", color: "#f59e0b" }}
-                                  onClick={() => handleDownloadMockJson(m)}
-                                  title="Download JSON, edit in VS Code, then upload back"
-                                >
-                                  🔄 Update JSON
-                                </button>
-                                <button className="btn-del" onClick={() => setDeleteMockConfirm(m.id)}>🗑</button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
